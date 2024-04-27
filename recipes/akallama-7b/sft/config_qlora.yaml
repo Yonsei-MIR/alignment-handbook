@@ -28,7 +28,6 @@ preprocessing_num_workers: 12
 
 # DPOTrainer arguments
 bf16: true
-beta: 0.01
 do_eval: true
 evaluation_strategy: steps
 eval_steps: 100
@@ -40,9 +39,8 @@ hub_model_id: akallama-7b-sft-qlora
 learning_rate: 5.0e-6
 log_level: info
 logging_steps: 10
+max_seq_length: 2048
 lr_scheduler_type: cosine
-max_length: 1024
-max_prompt_length: 512
 num_train_epochs: 1
 optim: paged_adamw_32bit
 output_dir: data/akallama-7b-sft-qlora # It is handy to append `hub_model_revision` to keep track of your local experiments
@@ -54,3 +52,5 @@ save_steps: 100
 save_total_limit: 1
 seed: 42
 warmup_ratio: 0.1
+report_to:
+- wandb
