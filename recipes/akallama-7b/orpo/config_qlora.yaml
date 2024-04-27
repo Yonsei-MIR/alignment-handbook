@@ -25,6 +25,7 @@ dataset_mixer:
 dataset_splits:
 - train
 preprocessing_num_workers: 12
+dataset_num_proc: 12
 
 # DPOTrainer arguments
 bf16: true
@@ -36,7 +37,7 @@ gradient_accumulation_steps: 4
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: false
-hub_model_id: akallama-7b-orpa-qlora
+hub_model_id: akallama-7b-orpo-qlora
 learning_rate: 5.0e-6
 log_level: info
 logging_steps: 10
@@ -56,3 +57,4 @@ seed: 42
 warmup_ratio: 0.1
 report_to:
 - wandb
+cache_raw_datasets: true

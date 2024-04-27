@@ -20,11 +20,14 @@ Supervised fine-tuning script for decoder language models.
 import logging
 import random
 import sys
+from pathlib import Path
 
 import datasets
 import torch
 import transformers
 from transformers import AutoModelForCausalLM, set_seed
+from huggingface_hub.constants import HF_HOME
+from datasets import load_from_disk
 
 from alignment import (
     DataArguments,
@@ -82,19 +85,32 @@ def main():
     if last_checkpoint is not None and training_args.resume_from_checkpoint is None:
         logger.info(f"Checkpoint detected, resuming training at {last_checkpoint=}.")
 
-    ###############
-    # Load datasets
-    ###############
-    raw_datasets = get_datasets(
-        data_args,
-        splits=data_args.dataset_splits,
-        configs=data_args.dataset_configs,
-        columns_to_keep=["messages", "chosen", "rejected", "prompt", "completion", "label"],
-    )
-    logger.info(
-        f"Training on the following datasets and their proportions: {[split + ' : ' + str(dset.num_rows) for split, dset in raw_datasets.items()]}"
-    )
-    column_names = list(raw_datasets["train"].features)
+    pre_datasets = None
+
+    if data_args.cache_raw_datasets:
+        cache_dir = Path(HF_HOME) / 'trl'
+        cache_dir.mkdir(exist_ok=True, parents=True)
+        key = training_args.hub_model_id
+        cache_path = cache_dir / key
+        if cache_path.is_dir():
+            logger.info(f"Loading preprocessed data cache from: {cache_path}")
+            pre_datasets = load_from_disk(str(cache_path))
+
+    if pre_datasets is None:
+
+        ###############
+        # Load datasets
+        ###############
+        raw_datasets = get_datasets(
+            data_args,
+            splits=data_args.dataset_splits,
+            configs=data_args.dataset_configs,
+            columns_to_keep=["messages", "chosen", "rejected", "prompt", "completion", "label"],
+        )
+        logger.info(
+            f"Training on the following datasets and their proportions: {[split + ' : ' + str(dset.num_rows) for split, dset in raw_datasets.items()]}"
+        )
+        column_names = list(raw_datasets["train"].features)
 
     ################
     # Load tokenizer
@@ -127,37 +143,43 @@ def main():
         model, tokenizer = setup_chat_format(model, tokenizer)
         model_kwargs = None
 
-    #####################
-    # Apply chat template
-    #####################
-    raw_datasets = raw_datasets.map(
-        apply_chat_template,
-        fn_kwargs={
-            "tokenizer": tokenizer,
-            "task": "sft",
-            "auto_insert_empty_system_msg": data_args.auto_insert_empty_system_msg,
-        },
-        num_proc=data_args.preprocessing_num_workers,
-        remove_columns=column_names,
-        desc="Applying chat template",
-    )
+    if pre_datasets is None:
 
-    ##########################
-    # Decontaminate benchmarks
-    ##########################
-    num_raw_train_samples = len(raw_datasets["train"])
-    raw_datasets = raw_datasets.filter(decontaminate_humaneval, batched=True, batch_size=10_000, num_proc=1)
-    num_filtered_train_samples = num_raw_train_samples - len(raw_datasets["train"])
-    logger.info(
-        f"Decontaminated {num_filtered_train_samples} ({num_filtered_train_samples/num_raw_train_samples * 100:.2f}%) samples from the training set."
-    )
+        #####################
+        # Apply chat template
+        #####################
+        raw_datasets = raw_datasets.map(
+            apply_chat_template,
+            fn_kwargs={
+                "tokenizer": tokenizer,
+                "task": "sft",
+                "auto_insert_empty_system_msg": data_args.auto_insert_empty_system_msg,
+            },
+            num_proc=data_args.preprocessing_num_workers,
+            remove_columns=column_names,
+            desc="Applying chat template",
+        )
 
-    train_dataset = raw_datasets["train"]
-    eval_dataset = raw_datasets["test"]
+        ##########################
+        # Decontaminate benchmarks
+        ##########################
+        num_raw_train_samples = len(raw_datasets["train"])
+        raw_datasets = raw_datasets.filter(decontaminate_humaneval, batched=True, batch_size=10_000, num_proc=1)
+        num_filtered_train_samples = num_raw_train_samples - len(raw_datasets["train"])
+        logger.info(
+            f"Decontaminated {num_filtered_train_samples} ({num_filtered_train_samples/num_raw_train_samples * 100:.2f}%) samples from the training set."
+        )
+        pre_datasets = raw_datasets
+
+        logger.info(f"saving preprocessed raw datasets to: {cache_path}")
+        pre_datasets.save_to_disk(str(cache_path))
+
+    train_dataset = pre_datasets["train"]
+    eval_dataset = pre_datasets["test"] if "tests" in pre_datasets else None
 
     with training_args.main_process_first(desc="Log a few random samples from the processed training set"):
-        for index in random.sample(range(len(raw_datasets["train"])), 3):
-            logger.info(f"Sample {index} of the processed training set:\n\n{raw_datasets['train'][index]['text']}")
+        for index in random.sample(range(len(pre_datasets["train"])), 3):
+            logger.info(f"Sample {index} of the processed training set:\n\n{pre_datasets['train'][index]['text']}")
 
     ########################
     # Initialize the Trainer
@@ -170,6 +192,7 @@ def main():
         eval_dataset=eval_dataset,
         dataset_text_field="text",
         max_seq_length=training_args.max_seq_length,
+        dataset_num_proc=training_args.dataset_num_proc,
         tokenizer=tokenizer,
         packing=True,
         peft_config=get_peft_config(model_args),
